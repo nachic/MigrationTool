@@ -1,98 +1,102 @@
 #include "pin.H"
 #include <iostream>
 #include <fstream>
-#include <map>
-#include <vector>
-#include <string>
-#include <sstream>
-#include <iomanip>
+#include <unordered_map>
+#include <set>
 
-std::map<std::string, UINT64> functionCount;
-std::vector<std::string> callSequence;
+// Output file for the .dot graph
 std::ofstream outFile;
 
-// This function will be called before each function is executed
-void recordFunctionCall(ADDRINT address, const std::string &name) {
-    // Increment the execution count for this function
-    functionCount[name]++;
-    callSequence.push_back(name);
+// Stores function execution counts
+std::unordered_map<std::string, int> funcExecCount;
+
+// Stores the edges of the control flow graph (function calls)
+std::set<std::pair<std::string, std::string>> callEdges;
+
+// Keeps track of the previous function in the call sequence
+std::string prevFunc = "";
+
+// This function is called before every function is executed
+VOID FuncEntry(VOID *ip, std::string *funcName)
+{
+    // Increment the execution count of the function
+    funcExecCount[*funcName]++;
+
+    // Record the function call edge in the sequence if it's not the first function
+    if (!prevFunc.empty())
+    {
+        callEdges.insert(std::make_pair(prevFunc, *funcName));
+    }
+
+    // Update previous function
+    prevFunc = *funcName;
 }
 
-// This function is called for each function found
-void imageLoad(IMG img, VOID *v) {
-    // Iterate over all functions in the loaded image
-    for (RTN rtn = RTN_Before(img); RTN_Valid(rtn); rtn = RTN_Next(rtn)) {
-        // Get function name
-        const std::string name = RTN_Name(rtn);
-        if (!name.empty()) {
-            // Instrument the function to record its execution
+// This routine is executed for each image loaded
+VOID Image(IMG img, VOID *v)
+{
+    // Instrument each routine (function)
+    for (SEC sec = IMG_SecHead(img); SEC_Valid(sec); sec = SEC_Next(sec))
+    {
+        for (RTN rtn = SEC_RtnHead(sec); RTN_Valid(rtn); rtn = RTN_Next(rtn))
+        {
+            // Name of the function
+            std::string *funcName = new std::string(RTN_Name(rtn));
+
+            // Instrument the function to call FuncEntry before execution
             RTN_Open(rtn);
-            RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)recordFunctionCall, 
-                           IARG_ADDRINT, RTN_Address(rtn),
-                           IARG_ADDRINT, name.c_str(),
+            RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)FuncEntry,
+                           IARG_INST_PTR,
+                           IARG_PTR, funcName,
                            IARG_END);
             RTN_Close(rtn);
         }
     }
 }
 
-// This function is called when the program exits
-void fini(INT32 code, VOID *v) {
-    // Open the JSON output file
-    outFile.open("control_graph.json");
-    
-    // Write the JSON structure
-    outFile << "{\n";
-    outFile << "  \"functions\": {\n";
-    
-    // Output the function counts
-    for (const auto &func : functionCount) {
-        outFile << "    \"" << func.first << "\": " << func.second << ",\n";
-    }
-    
-    // Remove the last comma
-    if (!functionCount.empty()) {
-        outFile.seekp(-2, std::ios_base::end); // Move the pointer to remove the last comma
-        outFile << "\n";
-    }
-    
-    outFile << "  },\n";
-    outFile << "  \"call_sequence\": [\n";
-    
-    // Output the call sequence
-    for (const auto &call : callSequence) {
-        outFile << "    \"" << call << "\",\n";
-    }
-    
-    // Remove the last comma
-    if (!callSequence.empty()) {
-        outFile.seekp(-2, std::ios_base::end); // Move the pointer to remove the last comma
-        outFile << "\n";
-    }
-    
-    outFile << "  ]\n";
-    outFile << "}\n";
+// This function is called when the application exits
+VOID Fini(INT32 code, VOID *v)
+{
+    // Write the DOT graph to file
+    outFile << "digraph ControlFlowGraph {\n";
 
+    // Write the nodes with their execution frequency
+    for (const auto &entry : funcExecCount)
+    {
+        outFile << "    \"" << entry.first << "\" [label=\"" << entry.first << "\\nExec Count: " << entry.second << "\"];\n";
+    }
+
+    // Write the edges
+    for (const auto &edge : callEdges)
+    {
+        outFile << "    \"" << edge.first << "\" -> \"" << edge.second << "\";\n";
+    }
+
+    outFile << "}\n";
     outFile.close();
 }
 
-int main(int argc, char *argv[]) {
-    // Initialize the PIN library
-    if (PIN_Init(argc, argv)) {
+// Main function
+int main(int argc, char *argv[])
+{
+    // Initialize PIN
+    if (PIN_Init(argc, argv))
+    {
+        std::cerr << "PIN Initialization Failed" << std::endl;
         return 1;
     }
 
-    // Open the output file for writing
-    outFile.open("control_graph.json");
+    // Open output file (append mode)
+    outFile.open("control_flow_graph.dot", std::ios_base::app);
 
-    // Register image load callback
-    IMG_AddInstrumentFunction(imageLoad, 0);
-    
-    // Register function to be called at program exit
-    PIN_AddFiniFunction(fini, 0);
+    // Register Image to be called to instrument functions
+    IMG_AddInstrumentFunction(Image, 0);
+
+    // Register Fini to be called when the application exits
+    PIN_AddFiniFunction(Fini, 0);
 
     // Start the program, never returns
     PIN_StartProgram();
-    
+
     return 0;
 }
